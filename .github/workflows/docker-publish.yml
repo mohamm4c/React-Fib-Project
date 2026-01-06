@@ -1,0 +1,49 @@
+name: Docker
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Run tests using the dev Dockerfile (no registry login needed)
+      - name: Build test image
+        run: docker build -t react-test -f ./client/Dockerfile.dev ./client
+
+      - name: Run tests
+        run: docker run -e CI=true react-test npm test
+
+      # Login to GHCR using the built-in GITHUB_TOKEN (no secrets needed)
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Build production images and tag for GHCR
+      - name: Build images
+        if: github.event_name != 'pull_request'
+        run: |
+          docker build -t ghcr.io/${{ github.repository_owner }}/multi-client:latest ./client
+          docker build -t ghcr.io/${{ github.repository_owner }}/multi-nginx:latest ./nginx
+          docker build -t ghcr.io/${{ github.repository_owner }}/multi-server:latest ./server
+          docker build -t ghcr.io/${{ github.repository_owner }}/multi-worker:latest ./worker
+
+      # Push images to GHCR
+      - name: Push images
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push ghcr.io/${{ github.repository_owner }}/multi-client:latest
+          docker push ghcr.io/${{ github.repository_owner }}/multi-nginx:latest
+          docker push ghcr.io/${{ github.repository_owner }}/multi-server:latest
+          docker push ghcr.io/${{ github.repository_owner }}/multi-worker:latest
