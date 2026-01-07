@@ -93,7 +93,7 @@ jobs:
       # ---------- UPLOAD TO S3 ----------
       - name: Upload bundle to S3
         run: |
-          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
+          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           S3_KEY="deploy-${VERSION_LABEL}.zip"
           aws s3 cp deploy.zip "s3://${{ secrets.EB_S3_BUCKET }}/${S3_KEY}"
           echo "VERSION_LABEL=${VERSION_LABEL}" >> $GITHUB_ENV
