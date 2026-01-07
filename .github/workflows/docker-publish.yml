@@ -1,4 +1,4 @@
-name: Docker
+name: Docker + Deploy to Elastic Beanstalk
 
 on:
   push:
@@ -18,17 +18,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      # ---------- TESTS ----------
       - name: Build test image
         run: docker build -t react-test -f ./client/Dockerfile.dev ./client
 
       - name: Run tests
         run: docker run -e CI=true react-test npm test
 
+      # ---------- GHCR LOGIN ----------
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build images
+      # ---------- BUILD IMAGES ----------
+      - name: Build production images
         if: github.event_name != 'pull_request'
         run: |
           docker build -t ghcr.io/${{ github.repository_owner }}/multi-client:latest ./client
@@ -36,7 +39,8 @@ jobs:
           docker build -t ghcr.io/${{ github.repository_owner }}/multi-server:latest ./server
           docker build -t ghcr.io/${{ github.repository_owner }}/multi-worker:latest ./worker
 
-      - name: Push images
+      # ---------- PUSH IMAGES ----------
+      - name: Push images to GHCR
         if: github.event_name != 'pull_request'
         run: |
           docker push ghcr.io/${{ github.repository_owner }}/multi-client:latest
@@ -48,52 +52,70 @@ jobs:
     name: Deploy to Elastic Beanstalk
     needs: build
     runs-on: ubuntu-latest
+
+    # only deploy on direct pushes to master (not PR builds)
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
+      # ---------- AWS AUTH (OPTION 2: ACCESS KEYS) ----------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ secrets.AWS_REGION }}
 
-      - name: Create deploy bundle (zip)
+      # ---------- PACKAGE SOURCE BUNDLE ----------
+      - name: Create Elastic Beanstalk source bundle (zip)
         run: |
-          # This assumes your EB-ready docker-compose.yml is at repo root
-          test -f docker-compose.yml
+          # EB expects docker-compose.yml at the root of the zip
+          if [ ! -f docker-compose.yml ]; then
+            echo "ERROR: docker-compose.yml not found at repo root."
+            echo "Place your EB-ready docker-compose.yml at the root of the repo."
+            exit 1
+          fi
 
-          # (Optional) include .ebextensions if you have it
+          rm -f deploy.zip
+
+          # Include .ebextensions if you have any (optional)
           if [ -d .ebextensions ]; then
             zip -r deploy.zip docker-compose.yml .ebextensions
           else
             zip -r deploy.zip docker-compose.yml
           fi
 
+      # ---------- UPLOAD TO S3 ----------
       - name: Upload bundle to S3
         run: |
           VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
-          aws s3 cp deploy.zip "s3://${{ secrets.EB_S3_BUCKET }}/deploy-${VERSION_LABEL}.zip"
+          S3_KEY="deploy-${VERSION_LABEL}.zip"
+          aws s3 cp deploy.zip "s3://${{ secrets.EB_S3_BUCKET }}/${S3_KEY}"
+          echo "VERSION_LABEL=${VERSION_LABEL}" >> $GITHUB_ENV
+          echo "S3_KEY=${S3_KEY}" >> $GITHUB_ENV
 
-      - name: Create EB application version
+      # ---------- CREATE EB APP VERSION ----------
+      - name: Create Elastic Beanstalk application version
         run: |
-          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
           aws elasticbeanstalk create-application-version \
             --application-name "${{ secrets.EB_APP_NAME }}" \
-            --version-label "${VERSION_LABEL}" \
-            --source-bundle S3Bucket="${{ secrets.EB_S3_BUCKET }}",S3Key="deploy-${VERSION_LABEL}.zip"
+            --version-label "${{ env.VERSION_LABEL }}" \
+            --source-bundle S3Bucket="${{ secrets.EB_S3_BUCKET }}",S3Key="${{ env.S3_KEY }}"
 
-      - name: Update EB environment
+      # ---------- DEPLOY TO EB ENV ----------
+      - name: Deploy to Elastic Beanstalk environment
         run: |
-          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
           aws elasticbeanstalk update-environment \
             --environment-name "${{ secrets.EB_ENV_NAME }}" \
-            --version-label "${VERSION_LABEL}"
+            --version-label "${{ env.VERSION_LABEL }}"
 
-      - name: Wait until environment is Ready/Green
+      # ---------- WAIT FOR EB ----------
+      - name: Wait for environment to finish updating
         run: |
           aws elasticbeanstalk wait environment-updated --environment-name "${{ secrets.EB_ENV_NAME }}"
           aws elasticbeanstalk wait environment-ready --environment-name "${{ secrets.EB_ENV_NAME }}"
