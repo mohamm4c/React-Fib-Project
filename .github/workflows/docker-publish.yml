@@ -18,19 +18,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # Run tests using the dev Dockerfile (no registry login needed)
       - name: Build test image
         run: docker build -t react-test -f ./client/Dockerfile.dev ./client
 
       - name: Run tests
         run: docker run -e CI=true react-test npm test
 
-      # Login to GHCR using the built-in GITHUB_TOKEN (no secrets needed)
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # Build production images and tag for GHCR
       - name: Build images
         if: github.event_name != 'pull_request'
         run: |
@@ -39,7 +36,6 @@ jobs:
           docker build -t ghcr.io/${{ github.repository_owner }}/multi-server:latest ./server
           docker build -t ghcr.io/${{ github.repository_owner }}/multi-worker:latest ./worker
 
-      # Push images to GHCR
       - name: Push images
         if: github.event_name != 'pull_request'
         run: |
@@ -47,3 +43,61 @@ jobs:
           docker push ghcr.io/${{ github.repository_owner }}/multi-nginx:latest
           docker push ghcr.io/${{ github.repository_owner }}/multi-server:latest
           docker push ghcr.io/${{ github.repository_owner }}/multi-worker:latest
+
+  deploy:
+    name: Deploy to Elastic Beanstalk
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create deploy bundle (zip)
+        run: |
+          # This assumes your EB-ready docker-compose.yml is at repo root
+          test -f docker-compose.yml
+
+          # (Optional) include .ebextensions if you have it
+          if [ -d .ebextensions ]; then
+            zip -r deploy.zip docker-compose.yml .ebextensions
+          else
+            zip -r deploy.zip docker-compose.yml
+          fi
+
+      - name: Upload bundle to S3
+        run: |
+          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
+          aws s3 cp deploy.zip "s3://${{ secrets.EB_S3_BUCKET }}/deploy-${VERSION_LABEL}.zip"
+
+      - name: Create EB application version
+        run: |
+          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ secrets.EB_APP_NAME }}" \
+            --version-label "${VERSION_LABEL}" \
+            --source-bundle S3Bucket="${{ secrets.EB_S3_BUCKET }}",S3Key="deploy-${VERSION_LABEL}.zip"
+
+      - name: Update EB environment
+        run: |
+          VERSION_LABEL="${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ secrets.EB_ENV_NAME }}" \
+            --version-label "${VERSION_LABEL}"
+
+      - name: Wait until environment is Ready/Green
+        run: |
+          aws elasticbeanstalk wait environment-updated --environment-name "${{ secrets.EB_ENV_NAME }}"
+          aws elasticbeanstalk wait environment-ready --environment-name "${{ secrets.EB_ENV_NAME }}"
+          aws elasticbeanstalk describe-environments \
+            --environment-names "${{ secrets.EB_ENV_NAME }}" \
+            --query "Environments[0].{Status:Status,Health:Health,URL:CNAME}" \
+            --output table
