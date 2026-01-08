@@ -21,7 +21,7 @@ function App() {
             Learn React
           </a>
           <Link to="/">Another Home</Link>
-          <Link to="/otherpage">Other Page</Link>
+          <Link to="/otherpage">another Other Page</Link>
         </header>
         <div>
           <Route exact path="/" component={Fib} />
