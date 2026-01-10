@@ -14,6 +14,6 @@ spec:
     spec:
       containers:
         - name: server
-          image: ghcr.io/mohamm4c/multiserver
+          image: ghcr.io/mohamm4c/multi-server
           ports: 
             - containerPort: 5000
